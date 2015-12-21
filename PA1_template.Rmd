@@ -1,0 +1,180 @@
+# Reproducible Research: Peer Assessment 1
+
+
+## Loading and preprocessing the data
+```{r, echo=TRUE}
+unzip("./activity.zip") # contains activity.csv
+data <- read.csv("./activity.csv")
+head(data)
+```
+
+## What is mean total number of steps taken per day?
+
+First, let's see a histogram.
+```{r, fig.width=8, fig.height=4, echo=TRUE}
+steps.each.day <- tapply(data$steps, data$date, sum)
+
+library(ggplot2)
+bwidth <- diff(range(steps.each.day, na.rm=TRUE)) / 30
+qplot(steps.each.day, geom="histogram", binwidth=bwidth) +
+    geom_rug(color="blue", alpha=0.7) +
+    labs(x="Steps per day", y="Frequency", title="Histogram of total steps per day")
+
+mu <- mean(steps.each.day, na.rm=TRUE)
+med <- median(steps.each.day, na.rm=TRUE)
+mu
+med
+```
+
+The mean number of total steps per day is **`r mu`** and the median
+is **`r med`**.
+
+
+## What is the average daily activity pattern?
+
+The daily activity pattern averaged within each five minute interval across all
+days:
+```{r, fig.width=8, fig.height=4, echo=TRUE}
+library(plyr)
+interval.means <- ddply(data, "interval", summarise,
+                        mean=mean(steps, na.rm=TRUE))
+ggplot(interval.means, aes(interval, mean)) + geom_path() +
+    labs(title="Mean # Steps by 5-minute Time Interval", x="Interval")
+
+idx <- which.max(interval.means$mean)
+interval.means[idx,]
+```
+
+The interval with the maximum number of steps when averaged across all days is
+**interval `r interval.means[idx, "interval"]`**.
+
+## Imputing missing values
+```{r, echo=TRUE}
+incomplete.rows <- sum(!complete.cases(data))
+incomplete.rows
+```
+It looks like we have **`r incomplete.rows`** rows with NAs in our dataset.
+Before we start with imputation, let's try to get a feel for where the missing
+values are. We can start by counting how many NA values exist within each five
+minute interval across all days using ddply:
+
+```{r, echo=TRUE}
+interval.nas <- ddply(data, "interval", summarise, na.count=sum(is.na(steps)))
+head(interval.nas)
+```
+
+Now isn't that interesting? The first few values are 8. I wonder how many
+intervals have 8 NAs, could it be all of them?
+
+```{r, echo=TRUE}
+all(interval.nas$na.count == 8)
+```
+
+Indeed! My guess is that this means that there were 8 days where no data were
+collected. Let's confirm. We'll use ddply again to count the total
+number of NA observations by day:
+
+```{r, echo=TRUE}
+intervals.per.day <- 24 * 60 / 5 # how many 5 minute intervals in a day (288)
+intervals.per.day
+date.nas <- ddply(data, "date", summarise, na.count=sum(is.na(steps)))
+head(date.nas)
+sum(date.nas$na.count == intervals.per.day)
+```
+
+As expected, there are eight days with no data, and furthermore these eight
+days contain the entire set of NAs:
+
+```{r, echo=TRUE}
+dates.with.nas <- unique(date.nas$date[date.nas$na.count != 0])
+length(dates.with.nas)
+```
+
+Given what we have learned so far, I believe that a reasonable imputation
+strategy would be to populate the days that are missing data with the mean
+values for that day of the week.
+
+To get started, let's add a **weekday** column to our original data frame:
+
+```{r, echo=TRUE}
+data$weekday <- factor(weekdays(as.Date(data$date)),
+                       levels=c("Sunday", "Monday", "Tuesday", "Wednesday",
+                                "Thursday", "Friday", "Saturday"))
+head(data)
+head(data[data$interval == 0,])
+weekdays.with.na <- unique(data[data$date %in% dates.with.nas,]$weekday)
+weekdays.with.na
+```
+
+Looks good, now we need to compute the mean within each five minute interval
+separately for each weekday:
+
+```{r, echo=TRUE}
+means.sd <- ddply(data, c("interval", "weekday"),
+                  summarise, steps=mean(steps, na.rm=TRUE))
+```
+
+Now let's question whether or not computing the mean by weekday is going to be
+any more informative than just substituting the overall mean across all days
+(this is a bit of foreshadowing for the next question):
+
+```{r, fig.width=8, fig.height=8, echo=TRUE}
+ggplot(means.sd, aes(interval, steps)) + geom_line() +
+    facet_grid(weekday ~ .) +
+    labs(x="Interval", y="Steps", title="Daily activity")
+```
+
+There seems to be enough variability between days to support imputation by
+weekday. Let's fill in the missing values.
+
+```{r, echo=TRUE}
+# Separate the complete and incomplete cases
+complete.ind <- complete.cases(data)
+complete <- data[complete.ind,]
+incomplete <- data[!complete.ind,]
+# Merge the incomplete cases with the per-interval means by weekday
+merged <- merge(incomplete[, c("weekday", "interval", "date")], means.sd,
+                by=c("interval", "weekday"))
+# Bind the complete and newly imputed values together
+imputed <- rbind(complete, merged)
+sum(!complete.cases(imputed)) # should be 0 incomplete cases now
+```
+
+Now we can make another histogram and recalculate the mean and median:
+```{r, fig.width=8, fig.height=4, echo=TRUE}
+imp.steps.each.day <- tapply(imputed$steps, data$date, sum)
+
+bwidth <- diff(range(imp.steps.each.day, na.rm=TRUE)) / 30
+qplot(imp.steps.each.day, geom="histogram", binwidth=bwidth) +
+    geom_rug(color="blue", alpha=0.7) +
+    labs(x="Steps per day", y="Frequency",
+         title="Histogram of total steps per day (post imputation)")
+
+imp.mu <- mean(imp.steps.each.day, na.rm=TRUE)
+imp.med <- median(imp.steps.each.day, na.rm=TRUE)
+imp.mu
+imp.med
+```
+
+So the mean is now **`r imp.mu`** and the median is **`r imp.med`**,
+which are both different from the values we obtained before imputation
+(`r mu`, `r med`, respectively).
+
+
+## Are there differences in activity patterns between weekdays and weekends?
+
+We'll add an boolean indicator variable *weekend* to our data.frame that
+includes imputed values and make a plot to answer the question.
+
+```{r, fig.width=8, fig.height=4, echo=TRUE}
+wkend.days <- c("Saturday", "Sunday")
+day.type <- factor(imputed$weekday %in% wkend.days)
+imputed$day.type <- mapvalues(day.type, from=c("FALSE", "TRUE"), to=c("Weekday", "Weekend"))
+imputed.means <- ddply(imputed, .(interval, day.type), summarise, mean=mean(steps, na.rm=TRUE))
+head(imputed.means)
+ggplot(imputed.means, aes(interval, mean)) + geom_line() + facet_grid(day.type ~ .) +
+    labs(x="Interval", y="Steps", title="Activity by day type")
+```
+
+There appears to be a difference. For one thing, our subject appears to sleep
+a bit later on the weekends (much like myself).
